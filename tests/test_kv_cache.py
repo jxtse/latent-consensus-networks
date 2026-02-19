@@ -69,3 +69,98 @@ class TestHierarchicalKVCache:
             )
             for _ in range(num_layers)
         )
+
+
+class TestKVCacheAggregation:
+    """Tests for KV-Cache aggregation methods."""
+
+    def test_aggregate_group_creates_group_cache(self):
+        """aggregate_group should create a group-level cache from local caches."""
+        cache = HierarchicalKVCache(num_groups=2, agents_per_group=2)
+
+        # Add two agents to group 0
+        kv1 = self._create_mock_kv(num_layers=2, seq_len=10, hidden_dim=64)
+        kv2 = self._create_mock_kv(num_layers=2, seq_len=10, hidden_dim=64)
+
+        cache.update_local(agent_id=0, group_id=0, kv_cache=kv1)
+        cache.update_local(agent_id=1, group_id=0, kv_cache=kv2)
+
+        cache.aggregate_group(group_id=0)
+
+        assert 0 in cache.group_caches
+        group_kv = cache.group_caches[0]
+
+        # Check shape: should have same structure as input
+        assert len(group_kv) == 2  # num_layers
+        assert group_kv[0][0].shape == kv1[0][0].shape  # key shape
+        assert group_kv[0][1].shape == kv1[0][1].shape  # value shape
+
+    def test_aggregate_group_computes_mean(self):
+        """aggregate_group should compute mean of local caches."""
+        cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+
+        # Create KV-Caches with known values
+        kv1 = ((torch.ones(1, 1, 4, 8) * 2, torch.ones(1, 1, 4, 8) * 2),)
+        kv2 = ((torch.ones(1, 1, 4, 8) * 4, torch.ones(1, 1, 4, 8) * 4),)
+
+        cache.update_local(agent_id=0, group_id=0, kv_cache=kv1)
+        cache.update_local(agent_id=1, group_id=0, kv_cache=kv2)
+
+        cache.aggregate_group(group_id=0)
+
+        group_kv = cache.group_caches[0]
+
+        # Mean of 2 and 4 should be 3
+        assert torch.allclose(group_kv[0][0], torch.ones(1, 1, 4, 8) * 3)
+        assert torch.allclose(group_kv[0][1], torch.ones(1, 1, 4, 8) * 3)
+
+    def test_aggregate_global_creates_global_cache(self):
+        """aggregate_global should create a global cache from group caches."""
+        cache = HierarchicalKVCache(num_groups=2, agents_per_group=2)
+
+        # Setup: add agents and aggregate groups
+        for agent_id in range(4):
+            group_id = agent_id // 2
+            kv = self._create_mock_kv(num_layers=2, seq_len=10, hidden_dim=64)
+            cache.update_local(agent_id=agent_id, group_id=group_id, kv_cache=kv)
+
+        cache.aggregate_group(group_id=0)
+        cache.aggregate_group(group_id=1)
+        cache.aggregate_global()
+
+        assert cache.global_cache is not None
+        assert len(cache.global_cache) == 2  # num_layers
+
+    def test_get_all_levels_returns_three_levels(self):
+        """get_all_levels should return local, group, and global caches."""
+        cache = HierarchicalKVCache(num_groups=2, agents_per_group=2)
+
+        # Setup full hierarchy
+        for agent_id in range(4):
+            group_id = agent_id // 2
+            kv = self._create_mock_kv(num_layers=2, seq_len=10, hidden_dim=64)
+            cache.update_local(agent_id=agent_id, group_id=group_id, kv_cache=kv)
+
+        cache.aggregate_group(group_id=0)
+        cache.aggregate_group(group_id=1)
+        cache.aggregate_global()
+
+        local, group, global_ = cache.get_all_levels(agent_id=0)
+
+        # Local should be list of neighbor KV-Caches
+        assert isinstance(local, list)
+        assert len(local) == 1  # 1 neighbor in group of 2
+
+        # Group and global should be single KV-Caches
+        assert group is not None
+        assert global_ is not None
+
+    @staticmethod
+    def _create_mock_kv(num_layers: int, seq_len: int, hidden_dim: int):
+        return tuple(
+            (
+                torch.randn(1, 1, seq_len, hidden_dim),
+                torch.randn(1, 1, seq_len, hidden_dim),
+            )
+            for _ in range(num_layers)
+        )

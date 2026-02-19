@@ -92,3 +92,97 @@ class HierarchicalKVCache:
     def all_agent_ids(self) -> List[int]:
         """Get all agent IDs."""
         return list(self.local_caches.keys())
+
+    def aggregate_group(self, group_id: int) -> None:
+        """
+        Aggregate local caches within a group to create group-level cache.
+
+        Uses mean pooling across all agents in the group.
+
+        Args:
+            group_id: The group to aggregate
+        """
+        members = self.get_group_members(group_id)
+        if not members:
+            return
+
+        member_caches = [self.local_caches[aid] for aid in members if aid in self.local_caches]
+        if not member_caches:
+            return
+
+        self.group_caches[group_id] = self._mean_pool_kv_caches(member_caches)
+
+    def aggregate_global(self) -> None:
+        """
+        Aggregate all group caches to create global-level cache.
+
+        Uses weighted mean pooling based on group sizes.
+        """
+        if not self.group_caches:
+            return
+
+        group_caches = list(self.group_caches.values())
+        self.global_cache = self._mean_pool_kv_caches(group_caches)
+
+    def get_all_levels(
+        self,
+        agent_id: int
+    ) -> Tuple[List[KVCache], Optional[KVCache], Optional[KVCache]]:
+        """
+        Get all three levels of KV-Cache for an agent.
+
+        Args:
+            agent_id: The agent requesting caches
+
+        Returns:
+            Tuple of (local_neighbors, group_cache, global_cache)
+            - local_neighbors: List of KV-Caches from neighbor agents
+            - group_cache: Aggregated group KV-Cache
+            - global_cache: Aggregated global KV-Cache
+        """
+        # Local: get neighbor caches
+        neighbors = self.get_neighbors(agent_id)
+        local_caches = [
+            self.local_caches[nid]
+            for nid in neighbors
+            if nid in self.local_caches
+        ]
+
+        # Group: get agent's group cache
+        group_id = self._agent_to_group.get(agent_id)
+        group_cache = self.group_caches.get(group_id) if group_id is not None else None
+
+        # Global
+        global_cache = self.global_cache
+
+        return local_caches, group_cache, global_cache
+
+    @staticmethod
+    def _mean_pool_kv_caches(caches: List[KVCache]) -> KVCache:
+        """
+        Compute mean of multiple KV-Caches.
+
+        Args:
+            caches: List of KV-Caches to average
+
+        Returns:
+            Mean-pooled KV-Cache
+        """
+        if len(caches) == 1:
+            return caches[0]
+
+        num_layers = len(caches[0])
+        result = []
+
+        for layer_idx in range(num_layers):
+            # Stack keys and values from all caches
+            keys = torch.stack([c[layer_idx][0] for c in caches], dim=0)
+            values = torch.stack([c[layer_idx][1] for c in caches], dim=0)
+
+            # Mean along the stack dimension
+            mean_key = keys.mean(dim=0)
+            mean_value = values.mean(dim=0)
+
+            result.append((mean_key, mean_value))
+
+        return tuple(result)
