@@ -447,7 +447,56 @@ Level 3: 涌现层面
 
 ---
 
-## 7. 关键参考文献
+## 7. Multi-Agent LLM Systems（补充）
+
+### 7.1 主流框架对比
+
+| 框架 | 核心特点 | 通信模式 | 适用场景 |
+|------|---------|---------|---------|
+| **AutoGen** | 灵活可扩展、人机协同 | 对话驱动 | 通用 |
+| **MetaGPT** | SOP驱动、结构化输出 | 消息订阅 | 软件开发 |
+| **AgentVerse** | 仿真平台、可扩展 | 环境交互 | 研究/仿真 |
+| **CAMEL** | 角色扮演、自主对话 | Inception Prompting | 研究探索 |
+| **CrewAI** | 简洁易用、目标导向 | 任务链 | 快速原型 |
+
+### 7.2 协作模式
+
+| 模式 | 描述 | LCN 的对应 |
+|------|------|-----------|
+| **辩论式 (Debate)** | 多 Agent 对立观点碰撞 | Group 内部的多样性 |
+| **投票式** | 多 Agent 独立推理后聚合 | Global 层面的共识聚合 |
+| **层级式** | 任务分解 + 专业化分工 | Local/Group/Global 层次 |
+| **反思式 (Reflection)** | 执行→评估→改进循环 | 迭代共识更新 |
+
+### 7.3 Token 消耗问题
+
+**成本对比**：
+| 场景 | Token 消耗 | 估算成本 (GPT-4) |
+|------|-----------|------------------|
+| 单 Agent | ~3K | ~$0.09 |
+| 3-Agent 协作 | ~30K | ~$0.90 |
+| MetaGPT 完整流程 | ~100K+ | ~$3.00+ |
+
+**LCN 的优势**：Latent Space 通信减少 50-80% Token 消耗
+
+### 7.4 可扩展性限制
+
+- 当前系统通常限于 10-20 个 Agent
+- 超过 7 个 Agent 时协调开销显著增加
+- 明确的角色定义可减少 30% 无效通信
+
+**LCN 的解决方案**：层次化结构支持更大规模（Group 内部先协调，再跨 Group 协调）
+
+---
+
+## 8. 关键参考文献
+
+### Multi-Agent LLM Systems
+- Wu et al. (2023). AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation. arXiv:2308.08155
+- Hong et al. (2023). MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework. arXiv:2308.00352
+- Li et al. (2023). CAMEL: Communicative Agents for "Mind" Exploration. arXiv:2303.17760
+- Chen et al. (2023). AgentVerse: Facilitating Multi-Agent Collaboration. arXiv:2308.10848
+- Du et al. (2023). Improving Factuality through Multiagent Debate. arXiv:2305.14325
 
 ### Latent Space & MAS
 - Zou et al. (2025). LatentMAS: Latent Collaboration in Multi-Agent Systems. arXiv:2511.20639
