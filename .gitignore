@@ -1,2 +1,5 @@
 LatentMAS
 .claude
+__pycache__
+.pytest_cache
+.CLAUDE.md
