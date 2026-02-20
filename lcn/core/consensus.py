@@ -5,8 +5,9 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 import torch
 
 from lcn.core.agent import LCNAgent
-from lcn.core.kv_cache import HierarchicalKVCache
+from lcn.core.kv_cache import HierarchicalKVCache, KVCache
 from lcn.core.attention import CrossLevelAttention
+from lcn.core.results import ConsensusResult
 
 if TYPE_CHECKING:
     from lcn.models.model_wrapper import LCNModelWrapper
@@ -125,3 +126,128 @@ class ConsensusProtocol:
 
             # Store KV-Cache in hierarchical cache
             self.kv_cache.update_local(agent.agent_id, agent.group_id, kv_cache)
+
+    def _kv_to_repr(self, kv_cache: Optional[KVCache]) -> Optional[torch.Tensor]:
+        """
+        Convert a KV-Cache to a representation tensor for attention.
+
+        Extracts a representation from the KV-Cache by reshaping the value
+        tensors from the last layer. The values have shape [B, num_heads, L, head_dim]
+        and are reshaped to [B, L, hidden_dim] where hidden_dim = num_heads * head_dim.
+
+        Args:
+            kv_cache: KV-Cache tuple of (key, value) per layer, or None
+
+        Returns:
+            Representation tensor with shape [B, L, D], or None if input is None
+        """
+        if kv_cache is None:
+            return None
+
+        # Get the last layer's value tensor
+        # KV-Cache structure: ((k0, v0), (k1, v1), ...) where each k,v has shape [B, H, L, D_head]
+        last_layer_values = kv_cache[-1][1]  # [B, num_heads, seq_len, head_dim]
+
+        # Reshape from [B, num_heads, seq_len, head_dim] to [B, seq_len, hidden_dim]
+        batch_size, num_heads, seq_len, head_dim = last_layer_values.shape
+        hidden_dim = num_heads * head_dim
+
+        # Transpose to [B, seq_len, num_heads, head_dim] then reshape to [B, seq_len, hidden_dim]
+        repr_tensor = last_layer_values.transpose(1, 2).reshape(batch_size, seq_len, hidden_dim)
+
+        return repr_tensor
+
+    def _kv_list_to_repr(self, kv_caches: List[KVCache]) -> Optional[torch.Tensor]:
+        """
+        Convert a list of KV-Caches to a combined representation tensor.
+
+        Mean-pools across the list of KV-Caches, then converts to representation.
+
+        Args:
+            kv_caches: List of KV-Cache tuples
+
+        Returns:
+            Combined representation tensor with shape [B, L, D], or None if list is empty
+        """
+        if not kv_caches:
+            return None
+
+        # Mean-pool the KV-Caches first
+        pooled = HierarchicalKVCache._mean_pool_kv_caches(kv_caches)
+        return self._kv_to_repr(pooled)
+
+    def run(self, task: str, model: "LCNModelWrapper") -> ConsensusResult:
+        """
+        Execute the full consensus formation loop.
+
+        This method orchestrates the multi-round consensus formation process:
+        1. Initialize agents with the task
+        2. For each round:
+           a. Aggregate group and global caches
+           b. Each agent: get cross-level attention fusion
+           c. Each agent: update state with fused representation
+           d. Update local caches (states are already stored in agents)
+        3. Return placeholder ConsensusResult (decision making is Task 14)
+
+        Args:
+            task: The task/question for agents to consider
+            model: The LCNModelWrapper to use for generation
+
+        Returns:
+            ConsensusResult containing placeholder decision and attention history
+        """
+        # Step 1: Initialize agents
+        self._initialize_agents(task, model)
+
+        # Track attention history across rounds
+        attention_history: List[Dict] = []
+
+        # Step 2: Consensus rounds
+        for round_idx in range(self.num_rounds):
+            round_attention: Dict = {"round": round_idx, "agent_weights": {}}
+
+            # Step 2a: Aggregate caches at group and global levels
+            for group_id in self.group_ids:
+                self.kv_cache.aggregate_group(group_id)
+            self.kv_cache.aggregate_global()
+
+            # Step 2b-d: For each agent, fuse and update
+            for agent in self.agents:
+                # Get all levels of KV-Cache for this agent
+                local_caches, group_cache, global_cache = self.kv_cache.get_all_levels(
+                    agent.agent_id
+                )
+
+                # Convert to representations
+                local_repr = self._kv_list_to_repr(local_caches)
+                group_repr = self._kv_to_repr(group_cache)
+                global_repr = self._kv_to_repr(global_cache)
+
+                # Get agent's current state as query
+                query_state = agent.get_state()  # [B, D]
+
+                # Fuse via cross-level attention
+                fused_state, attn_weights = self.attention.forward(
+                    query_state=query_state,
+                    local_repr=local_repr,
+                    group_repr=group_repr,
+                    global_repr=global_repr,
+                )
+
+                # Store attention weights for this agent
+                round_attention["agent_weights"][agent.agent_id] = attn_weights.detach().cpu().tolist()
+
+                # Update agent state with fused representation
+                agent.set_state(fused_state)
+
+            # Record this round's attention history
+            attention_history.append(round_attention)
+
+        # Step 3: Return placeholder ConsensusResult
+        # (Task 14 will implement proper decision making)
+        return ConsensusResult(
+            decision="[placeholder - decision making not yet implemented]",
+            agent_decisions={agent.agent_id: "" for agent in self.agents},
+            attention_history=attention_history,
+            convergence_round=None,
+        )
