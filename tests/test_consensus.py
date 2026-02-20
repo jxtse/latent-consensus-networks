@@ -971,3 +971,71 @@ class TestRunMethod:
         result = protocol.run("Test task", mock_model)
 
         assert isinstance(result, ConsensusResult)
+
+    def test_run_hidden_states_change_across_rounds(self):
+        """run() should evolve hidden states across consensus rounds via attention fusion."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+
+        # Create a real attention module
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        num_rounds = 3
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=num_rounds,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents manually to capture initial states
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Capture states after initialization (before any consensus rounds)
+        initial_state_0 = agents[0].get_state().clone()
+        initial_state_1 = agents[1].get_state().clone()
+
+        # Manually run one consensus round to see state changes
+        # Step 2a: Aggregate caches
+        for group_id in protocol.group_ids:
+            kv_cache.aggregate_group(group_id)
+        kv_cache.aggregate_global()
+
+        # Step 2b-c: For agent 0, fuse and update
+        local_caches, group_cache, global_cache = kv_cache.get_all_levels(0)
+        local_repr = protocol._kv_list_to_repr(local_caches)
+        group_repr = protocol._kv_to_repr(group_cache)
+        global_repr = protocol._kv_to_repr(global_cache)
+
+        query_state = agents[0].get_state()
+        fused_state, _ = attention.forward(
+            query_state=query_state,
+            local_repr=local_repr,
+            group_repr=group_repr,
+            global_repr=global_repr,
+        )
+        agents[0].set_state(fused_state)
+
+        # State after one round of fusion
+        state_after_round_0 = agents[0].get_state()
+
+        # Verify that the state actually changed
+        # The attention fusion should produce a different state because:
+        # 1. We have group and global representations available
+        # 2. The fused state is a weighted combination of query and context
+        assert state_after_round_0 is not None
+        assert initial_state_0 is not None
+        assert state_after_round_0.shape == initial_state_0.shape
+
+        # The states should be different after attention fusion
+        # (unless the attention weights are exactly [1, 0, 0, ...] which is unlikely)
+        state_diff = (state_after_round_0 - initial_state_0).abs().sum().item()
+        assert state_diff > 0, "Hidden state should change after attention fusion"

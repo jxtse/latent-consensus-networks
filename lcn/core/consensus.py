@@ -186,8 +186,15 @@ class ConsensusProtocol:
            a. Aggregate group and global caches
            b. Each agent: get cross-level attention fusion
            c. Each agent: update state with fused representation
-           d. Update local caches (states are already stored in agents)
         3. Return placeholder ConsensusResult (decision making is Task 14)
+
+        Note on KV-Cache vs Hidden State evolution:
+        - KV-Caches are generated once during initialization and remain static
+        - Hidden states evolve through attention fusion across rounds
+        - The consensus process uses KV-Caches as contextual representations
+          while the hidden states capture the evolving agent "opinions"
+        - New KV-Caches are not generated in the loop (model calls happen
+          only in initialization and final decision phases)
 
         Args:
             task: The task/question for agents to consider
@@ -238,6 +245,9 @@ class ConsensusProtocol:
                 round_attention["agent_weights"][agent.agent_id] = attn_weights.detach().cpu().tolist()
 
                 # Update agent state with fused representation
+                # Note: KV-Caches remain static; only hidden states evolve through
+                # attention fusion. This is by design - the KV-Caches provide stable
+                # contextual representations while states capture evolving opinions.
                 agent.set_state(fused_state)
 
             # Record this round's attention history
