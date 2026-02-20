@@ -4,6 +4,7 @@ from lcn.core.agent import LCNAgent
 from lcn.core.kv_cache import HierarchicalKVCache, KVCache
 from lcn.core.attention import CrossLevelAttention
 from lcn.core.consensus import ConsensusProtocol
+from lcn.core.results import ConsensusResult
 
 __all__ = [
     "LCNAgent",
@@ -11,4 +12,5 @@ __all__ = [
     "KVCache",
     "CrossLevelAttention",
     "ConsensusProtocol",
+    "ConsensusResult",
 ]
