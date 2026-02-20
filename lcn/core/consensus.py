@@ -1,6 +1,7 @@
 # lcn/core/consensus.py
 """Consensus formation protocol for LCN."""
 
+from collections import Counter
 from typing import Dict, List, Optional, TYPE_CHECKING
 import torch
 
@@ -253,11 +254,81 @@ class ConsensusProtocol:
             # Record this round's attention history
             attention_history.append(round_attention)
 
-        # Step 3: Return placeholder ConsensusResult
-        # (Task 14 will implement proper decision making)
+        # Step 3: Make final decision
+        return self._make_decision(task, model, attention_history)
+
+    def _make_decision(
+        self, task: str, model: "LCNModelWrapper", attention_history: List[Dict]
+    ) -> ConsensusResult:
+        """
+        Generate final text outputs and aggregate to group decision.
+
+        For each agent:
+        1. Build their prompt
+        2. Prepare input tokens
+        3. Generate text using the agent's KV-Cache as context
+        4. Store their decision
+
+        Then aggregate all decisions using majority voting.
+
+        Args:
+            task: The task/question for agents to consider
+            model: The LCNModelWrapper to use for generation
+            attention_history: Attention history from consensus rounds
+
+        Returns:
+            ConsensusResult with aggregated decision and per-agent decisions
+        """
+        agent_decisions: Dict[int, str] = {}
+
+        for agent in self.agents:
+            # Build prompt for this agent
+            messages = self._build_agent_prompt(agent, task)
+
+            # Prepare input tokens
+            input_ids, attention_mask = model.prepare_input(messages)
+
+            # Get this agent's KV-Cache for context
+            kv_cache = self.kv_cache.get_local(agent.agent_id)
+
+            # Generate text response
+            responses = model.generate_text(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=kv_cache,
+            )
+
+            # Store the agent's decision (first response, since batch_size=1)
+            agent_decisions[agent.agent_id] = responses[0]
+
+        # Aggregate to group decision using majority vote
+        decision = self._majority_vote(list(agent_decisions.values()))
+
         return ConsensusResult(
-            decision="[placeholder - decision making not yet implemented]",
-            agent_decisions={agent.agent_id: "" for agent in self.agents},
+            decision=decision,
+            agent_decisions=agent_decisions,
             attention_history=attention_history,
-            convergence_round=None,
+            convergence_round=self.num_rounds,
         )
+
+    def _majority_vote(self, decisions: List[str]) -> str:
+        """
+        Aggregate decisions using majority voting.
+
+        Returns the most common decision. On ties, returns the first
+        one encountered (preserves order).
+
+        Args:
+            decisions: List of decision strings from agents
+
+        Returns:
+            The most common decision, or empty string if no decisions
+        """
+        if not decisions:
+            return ""
+
+        # Count occurrences, preserving order for tie-breaking
+        counts = Counter(decisions)
+        # most_common returns items in decreasing frequency, with ties
+        # resolved by first encounter order
+        return counts.most_common(1)[0][0]

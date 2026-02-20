@@ -765,11 +765,13 @@ class TestRunMethod:
         protocol.register_agents(agents)
 
         mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text = MagicMock(return_value=["Response"])
 
         protocol.run("Test task", mock_model)
 
         # _initialize_agents calls prepare_input and generate_latent for each agent
-        assert mock_model.prepare_input.call_count == 2
+        # _make_decision also calls prepare_input for each agent (total: 2 init + 2 decision = 4)
+        assert mock_model.prepare_input.call_count == 4
         assert mock_model.generate_latent.call_count == 2
 
     def test_run_aggregates_caches_each_round(self):
@@ -861,8 +863,8 @@ class TestRunMethod:
         # Should have entries for each round
         assert len(result.attention_history) == num_rounds
 
-    def test_run_placeholder_decision(self):
-        """run() should return placeholder decision (Task 14 will implement real decision)."""
+    def test_run_returns_real_decision(self):
+        """run() should return a real decision from agents (not a placeholder)."""
         kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
         hidden_dim = 64
         attention = CrossLevelAttention(hidden_dim=hidden_dim)
@@ -881,12 +883,14 @@ class TestRunMethod:
         protocol.register_agents(agents)
 
         mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text = MagicMock(return_value=["Decision A"])
 
         result = protocol.run("Test task", mock_model)
 
-        # Placeholder decision
+        # Should be a real decision, not a placeholder
         assert result.decision is not None
         assert isinstance(result.decision, str)
+        assert result.decision == "Decision A"
 
     def test_run_with_multiple_groups(self):
         """run() should handle multiple groups correctly."""
@@ -1039,3 +1043,402 @@ class TestRunMethod:
         # (unless the attention weights are exactly [1, 0, 0, ...] which is unlikely)
         state_diff = (state_after_round_0 - initial_state_0).abs().sum().item()
         assert state_diff > 0, "Hidden state should change after attention fusion"
+
+
+class TestMakeDecision:
+    """Tests for ConsensusProtocol._make_decision method."""
+
+    def _create_mock_model(self, batch_size=1, hidden_dim=64, num_layers=2, num_heads=4, seq_len=3, head_dim=16):
+        """Helper to create a mock model for testing."""
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+        mock_model.generate_text = MagicMock(return_value=["Test response"])
+
+        return mock_model
+
+    def test_make_decision_returns_consensus_result(self):
+        """_make_decision should return a ConsensusResult instance."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text = MagicMock(return_value=["Response A"])
+
+        # Initialize agents first so they have KV-Caches
+        protocol._initialize_agents("Test task", mock_model)
+
+        attention_history = [{"round": 0, "agent_weights": {}}]
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        assert isinstance(result, ConsensusResult)
+
+    def test_make_decision_calls_generate_text_for_each_agent(self):
+        """_make_decision should call generate_text once per agent."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=3)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=2, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents first
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Reset call count for generate_text
+        mock_model.generate_text.reset_mock()
+        mock_model.generate_text.return_value = ["Response"]
+
+        attention_history = []
+        protocol._make_decision("Test task", mock_model, attention_history)
+
+        # Should call generate_text once per agent
+        assert mock_model.generate_text.call_count == 3
+
+    def test_make_decision_populates_agent_decisions(self):
+        """_make_decision should populate agent_decisions dict with each agent's response."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Make generate_text return different values for each call
+        mock_model.generate_text.side_effect = [["Response A"], ["Response B"]]
+
+        attention_history = []
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        # agent_decisions should map agent_id to their response
+        assert 0 in result.agent_decisions
+        assert 1 in result.agent_decisions
+        assert result.agent_decisions[0] == "Response A"
+        assert result.agent_decisions[1] == "Response B"
+
+    def test_make_decision_majority_vote(self):
+        """_make_decision should use majority vote to determine group decision."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=3)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=2, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Majority is "Yes" (2 out of 3)
+        mock_model.generate_text.side_effect = [["Yes"], ["No"], ["Yes"]]
+
+        attention_history = []
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        assert result.decision == "Yes"
+
+    def test_make_decision_sets_convergence_round(self):
+        """_make_decision should set convergence_round to num_rounds."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        num_rounds = 5
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=num_rounds,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        mock_model.generate_text.return_value = ["Response"]
+
+        attention_history = []
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        assert result.convergence_round == num_rounds
+
+    def test_make_decision_preserves_attention_history(self):
+        """_make_decision should include the passed attention_history in result."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        mock_model.generate_text.return_value = ["Response"]
+
+        attention_history = [
+            {"round": 0, "agent_weights": {0: [0.5, 0.5]}},
+            {"round": 1, "agent_weights": {0: [0.6, 0.4]}},
+        ]
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        assert result.attention_history == attention_history
+
+    def test_make_decision_uses_kv_cache_for_generation(self):
+        """_make_decision should pass KV-Cache to generate_text for context."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim)]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        mock_model.generate_text.return_value = ["Response"]
+
+        attention_history = []
+        protocol._make_decision("Test task", mock_model, attention_history)
+
+        # Verify generate_text was called with past_key_values
+        call_kwargs = mock_model.generate_text.call_args[1]
+        assert "past_key_values" in call_kwargs
+        assert call_kwargs["past_key_values"] is not None
+
+    def test_make_decision_with_tie_picks_first(self):
+        """_make_decision should pick the first most common response on tie."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=4)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=2, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=3, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+
+        # Initialize agents
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Tie: 2 "A" and 2 "B"
+        mock_model.generate_text.side_effect = [["A"], ["B"], ["A"], ["B"]]
+
+        attention_history = []
+        result = protocol._make_decision("Test task", mock_model, attention_history)
+
+        # Should pick the first most common - "A" appears first
+        assert result.decision == "A"
+
+
+class TestRunWithDecisionMaking:
+    """Tests for run() method integration with _make_decision."""
+
+    def _create_mock_model(self, batch_size=1, hidden_dim=64, num_layers=2, num_heads=4, seq_len=3, head_dim=16):
+        """Helper to create a mock model for testing."""
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+        mock_model.generate_text = MagicMock(return_value=["Test response"])
+
+        return mock_model
+
+    def test_run_calls_make_decision(self):
+        """run() should call _make_decision and return its result."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text.side_effect = [["Decision A"], ["Decision B"]]
+
+        result = protocol.run("Test task", mock_model)
+
+        # Should no longer be a placeholder
+        assert result.decision != "[placeholder - decision making not yet implemented]"
+        assert result.decision in ["Decision A", "Decision B"]
+
+    def test_run_returns_real_agent_decisions(self):
+        """run() should return real agent decisions, not empty strings."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text.side_effect = [["Response 1"], ["Response 2"]]
+
+        result = protocol.run("Test task", mock_model)
+
+        # Agent decisions should contain actual responses
+        assert result.agent_decisions[0] == "Response 1"
+        assert result.agent_decisions[1] == "Response 2"
+
+    def test_run_sets_convergence_round_to_num_rounds(self):
+        """run() should set convergence_round to num_rounds."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        hidden_dim = 64
+        attention = CrossLevelAttention(hidden_dim=hidden_dim)
+
+        num_rounds = 4
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=num_rounds,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=hidden_dim),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=hidden_dim),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = self._create_mock_model(hidden_dim=hidden_dim)
+        mock_model.generate_text.return_value = ["Response"]
+
+        result = protocol.run("Test task", mock_model)
+
+        assert result.convergence_round == num_rounds
