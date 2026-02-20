@@ -169,22 +169,65 @@ class HiddenProfileEnvironment(BaseEnvironment):
 
         return agents
 
-    def get_agent_prompt(self, agent: LCNAgent, scenario: Any) -> str:
+    def get_agent_prompt(self, agent: LCNAgent, scenario: HiddenProfileScenario) -> str:
         """
-        Get agent's prompt with their unique information.
+        Build prompt with shared info + agent's unique hidden info.
 
-        Note: This is a stub implementation for Task 16.
-        Full implementation in Task 17.
+        In the hidden profile paradigm, each agent sees:
+        - All shared information (known to everyone)
+        - Only their own private/hidden information
 
         Args:
             agent: The LCNAgent for which to generate the prompt.
             scenario: The HiddenProfileScenario to be presented.
 
         Returns:
-            A string prompt for the agent (stub returns placeholder).
+            A formatted prompt string for the agent.
         """
-        # Stub implementation - full implementation in Task 17
-        return f"Agent {agent.agent_id}: Please evaluate the candidates."
+        # Build persona section
+        persona_section = f"You are a {agent.persona}."
+
+        # Build task introduction
+        candidates = list(scenario.shared_info.keys())
+        candidates_str = ", ".join(candidates[:-1]) + f", or {candidates[-1]}" if len(candidates) > 1 else candidates[0]
+        task_intro = f"You are part of a team making a hiring decision. Choose the best candidate ({candidates_str})."
+
+        # Build shared information section
+        shared_lines = ["SHARED INFORMATION (known to all):"]
+        for candidate, traits in scenario.shared_info.items():
+            shared_lines.append(f"Candidate {candidate}:")
+            for trait in traits:
+                shared_lines.append(f"- {trait}")
+            shared_lines.append("")  # Empty line between candidates
+        shared_section = "\n".join(shared_lines).rstrip()
+
+        # Build private information section
+        private_lines = ["YOUR PRIVATE INFORMATION (only you know this):"]
+        agent_hidden = scenario.hidden_info.get(agent.agent_id, {})
+        if agent_hidden:
+            for candidate, traits in agent_hidden.items():
+                private_lines.append(f"Candidate {candidate}:")
+                for trait in traits:
+                    private_lines.append(f"- {trait}")
+        else:
+            private_lines.append("(You have no additional private information.)")
+        private_section = "\n".join(private_lines)
+
+        # Build closing instruction
+        closing = "Based on all available information, which candidate would you recommend? Explain your reasoning."
+
+        # Combine all sections
+        prompt = f"""{persona_section}
+
+{task_intro}
+
+{shared_section}
+
+{private_section}
+
+{closing}"""
+
+        return prompt
 
     def evaluate(self, result: ConsensusResult, scenario: Any) -> Any:
         """

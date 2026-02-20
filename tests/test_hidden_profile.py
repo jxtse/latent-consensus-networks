@@ -227,7 +227,7 @@ class TestHiddenProfileEnvironmentCreateAgents:
 
 
 class TestHiddenProfileEnvironmentGetAgentPrompt:
-    """Tests for get_agent_prompt method (stub for now)."""
+    """Tests for get_agent_prompt method."""
 
     def test_get_agent_prompt_exists(self):
         """get_agent_prompt method should exist."""
@@ -244,6 +244,142 @@ class TestHiddenProfileEnvironmentGetAgentPrompt:
         prompt = env.get_agent_prompt(agents[0], scenario)
 
         assert isinstance(prompt, str)
+
+    def test_get_agent_prompt_contains_persona(self):
+        """get_agent_prompt should include the agent's persona."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        assert agents[0].persona in prompt
+
+    def test_get_agent_prompt_contains_all_shared_info(self):
+        """get_agent_prompt should include all shared info for all candidates."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Check that all candidate names are in the prompt
+        for candidate in scenario.shared_info:
+            assert candidate in prompt
+
+        # Check that all shared traits are present
+        for candidate, traits in scenario.shared_info.items():
+            for trait in traits:
+                assert trait in prompt
+
+    def test_get_agent_prompt_contains_agents_hidden_info(self):
+        """get_agent_prompt should include the agent's own hidden info."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Agent 0 has hidden info about candidate A
+        assert agents[0].agent_id in scenario.hidden_info
+        hidden_info = scenario.hidden_info[agents[0].agent_id]
+        for candidate, traits in hidden_info.items():
+            for trait in traits:
+                assert trait in prompt
+
+    def test_get_agent_prompt_excludes_other_agents_hidden_info(self):
+        """get_agent_prompt should NOT include other agents' hidden info."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Check that hidden info from other agents is NOT in the prompt
+        for agent_id, hidden_info in scenario.hidden_info.items():
+            if agent_id != agents[0].agent_id:
+                for candidate, traits in hidden_info.items():
+                    for trait in traits:
+                        assert trait not in prompt, f"Found other agent's hidden info: {trait}"
+
+    def test_get_agent_prompt_different_agents_get_different_hidden_info(self):
+        """Different agents should receive different hidden info in their prompts."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt_0 = env.get_agent_prompt(agents[0], scenario)
+        prompt_3 = env.get_agent_prompt(agents[3], scenario)
+
+        # Agent 0 and 3 have different hidden info
+        # Agent 0: {"A": ["missed deadlines twice"]}
+        # Agent 3: {"C": ["exceptional problem solver", "mentored junior staff", "led successful project"]}
+
+        # Verify each agent sees their own hidden info
+        assert "missed deadlines twice" in prompt_0
+        assert "exceptional problem solver" in prompt_3
+
+        # Verify they don't see each other's hidden info
+        assert "exceptional problem solver" not in prompt_0
+        assert "missed deadlines twice" not in prompt_3
+
+    def test_get_agent_prompt_includes_decision_instructions(self):
+        """get_agent_prompt should include instructions to make a decision."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Should ask for a decision/recommendation
+        prompt_lower = prompt.lower()
+        assert any(word in prompt_lower for word in ["recommend", "choose", "decision", "decide", "which candidate"])
+
+    def test_get_agent_prompt_agent_with_no_hidden_info(self):
+        """get_agent_prompt should work for agents with no hidden info."""
+        # Create a scenario where agent 10 has no hidden info
+        scenario = HiddenProfileScenario(
+            shared_info={"A": ["trait1"], "B": ["trait2"]},
+            hidden_info={0: {"A": ["secret"]}},
+            correct_answer="A",
+        )
+        env = HiddenProfileEnvironment(num_agents=2)
+        agents = env.create_agents()
+
+        # Agent 1 has no hidden info in this scenario
+        prompt = env.get_agent_prompt(agents[1], scenario)
+
+        # Should still be a valid prompt
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
+        # Should still contain shared info
+        assert "trait1" in prompt
+        assert "trait2" in prompt
+        # Should not crash or have hidden info section issues
+
+    def test_get_agent_prompt_has_shared_info_section(self):
+        """get_agent_prompt should clearly label shared information section."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Should have a section header for shared info
+        prompt_lower = prompt.lower()
+        assert "shared" in prompt_lower
+
+    def test_get_agent_prompt_has_private_info_section(self):
+        """get_agent_prompt should clearly label private information section."""
+        env = HiddenProfileEnvironment()
+        agents = env.create_agents()
+        scenario = env.scenarios[0]
+
+        prompt = env.get_agent_prompt(agents[0], scenario)
+
+        # Should have a section header for private info
+        prompt_lower = prompt.lower()
+        assert any(word in prompt_lower for word in ["private", "your", "unique", "only you"])
 
 
 class TestHiddenProfileEnvironmentEvaluate:
