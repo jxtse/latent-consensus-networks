@@ -180,3 +180,418 @@ class TestConsensusResult:
         assert hints["agent_decisions"] == Dict[int, str]
         assert hints["attention_history"] == List[Dict]
         assert hints["convergence_round"] == Optional[int]
+
+
+class TestBuildAgentPrompt:
+    """Tests for ConsensusProtocol._build_agent_prompt method."""
+
+    def test_build_agent_prompt_returns_list_of_dicts(self):
+        """_build_agent_prompt should return a list of message dicts."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona="You are a helpful assistant.")
+        task = "What is 2 + 2?"
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        assert isinstance(messages, list)
+        assert len(messages) > 0
+        assert all(isinstance(m, dict) for m in messages)
+
+    def test_build_agent_prompt_includes_user_role(self):
+        """_build_agent_prompt should include a message with role 'user'."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona="You are a scientist.")
+        task = "Explain photosynthesis."
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        roles = [m.get("role") for m in messages]
+        assert "user" in roles
+
+    def test_build_agent_prompt_includes_task_in_content(self):
+        """_build_agent_prompt should include the task in message content."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64)
+        task = "What is the capital of France?"
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        # Check that task appears in at least one message content
+        all_content = " ".join(m.get("content", "") for m in messages)
+        assert task in all_content
+
+    def test_build_agent_prompt_includes_persona_when_present(self):
+        """_build_agent_prompt should include persona in messages when agent has one."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        persona = "You are a conservative voter who values tradition."
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona=persona)
+        task = "Who should win the election?"
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        all_content = " ".join(m.get("content", "") for m in messages)
+        assert persona in all_content
+
+    def test_build_agent_prompt_works_without_persona(self):
+        """_build_agent_prompt should work when agent has no persona."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona=None)
+        task = "Solve this problem."
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        # Should still return valid messages
+        assert isinstance(messages, list)
+        assert len(messages) > 0
+        all_content = " ".join(m.get("content", "") for m in messages)
+        assert task in all_content
+
+    def test_build_agent_prompt_message_has_role_and_content_keys(self):
+        """Each message dict should have 'role' and 'content' keys."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agent = LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona="A persona")
+        task = "A task"
+
+        messages = protocol._build_agent_prompt(agent, task)
+
+        for msg in messages:
+            assert "role" in msg
+            assert "content" in msg
+
+
+class TestInitializeAgents:
+    """Tests for ConsensusProtocol._initialize_agents method."""
+
+    def test_initialize_agents_sets_agent_states(self):
+        """_initialize_agents should set hidden state for each agent."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona="Agent 0"),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=64, persona="Agent 1"),
+        ]
+        protocol.register_agents(agents)
+
+        # Mock model wrapper
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        # Mock generate_latent to return kv_cache and hidden_state
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        # All agents should have their state set
+        for agent in agents:
+            assert agent.get_state() is not None
+            assert agent.get_state().shape == (batch_size, hidden_dim)
+
+    def test_initialize_agents_stores_kv_cache_in_hierarchical_cache(self):
+        """_initialize_agents should store KV-Cache in the hierarchical cache."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=2)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=64),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=64),
+        ]
+        protocol.register_agents(agents)
+
+        # Mock model wrapper
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        # KV-Cache should be stored for each agent
+        for agent in agents:
+            stored_cache = kv_cache.get_local(agent.agent_id)
+            assert stored_cache is not None
+
+    def test_initialize_agents_calls_prepare_input_for_each_agent(self):
+        """_initialize_agents should call prepare_input once per agent."""
+        kv_cache = HierarchicalKVCache(num_groups=2, agents_per_group=2)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=64, persona="P0"),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=64, persona="P1"),
+            LCNAgent(agent_id=2, group_id=1, hidden_dim=64, persona="P2"),
+            LCNAgent(agent_id=3, group_id=1, hidden_dim=64, persona="P3"),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        assert mock_model.prepare_input.call_count == 4
+
+    def test_initialize_agents_calls_generate_latent_for_each_agent(self):
+        """_initialize_agents should call generate_latent once per agent."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=3)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=64),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=64),
+            LCNAgent(agent_id=2, group_id=0, hidden_dim=64),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        assert mock_model.generate_latent.call_count == 3
+
+    def test_initialize_agents_uses_latent_steps_from_protocol(self):
+        """_initialize_agents should pass protocol's latent_steps to generate_latent."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        latent_steps = 7  # Specific value to check
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=latent_steps,
+        )
+
+        agents = [LCNAgent(agent_id=0, group_id=0, hidden_dim=64)]
+        protocol.register_agents(agents)
+
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Check that generate_latent was called with the correct latent_steps
+        call_kwargs = mock_model.generate_latent.call_args[1]
+        assert call_kwargs["latent_steps"] == latent_steps
+
+    def test_initialize_agents_with_multiple_groups(self):
+        """_initialize_agents should correctly handle agents from multiple groups."""
+        kv_cache = HierarchicalKVCache(num_groups=2, agents_per_group=2)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        agents = [
+            LCNAgent(agent_id=0, group_id=0, hidden_dim=64),
+            LCNAgent(agent_id=1, group_id=0, hidden_dim=64),
+            LCNAgent(agent_id=2, group_id=1, hidden_dim=64),
+            LCNAgent(agent_id=3, group_id=1, hidden_dim=64),
+        ]
+        protocol.register_agents(agents)
+
+        mock_model = MagicMock()
+        mock_model.prepare_input = MagicMock(return_value=(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[1, 1, 1]])
+        ))
+
+        batch_size, hidden_dim = 1, 64
+        num_layers, num_heads, seq_len, head_dim = 2, 4, 3, 16
+        mock_kv_cache = tuple(
+            (
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+                torch.randn(batch_size, num_heads, seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+        mock_hidden = torch.randn(batch_size, hidden_dim)
+        mock_model.generate_latent = MagicMock(return_value=(mock_kv_cache, mock_hidden))
+
+        protocol._initialize_agents("Test task", mock_model)
+
+        # Check that KV-Cache has correct group mapping
+        assert kv_cache.get_agent_group(0) == 0
+        assert kv_cache.get_agent_group(1) == 0
+        assert kv_cache.get_agent_group(2) == 1
+        assert kv_cache.get_agent_group(3) == 1
+
+    def test_initialize_agents_with_no_agents_does_nothing(self):
+        """_initialize_agents should handle empty agent list gracefully."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=3,
+            latent_steps=5,
+        )
+
+        # No agents registered
+        mock_model = MagicMock()
+
+        # Should not raise, just do nothing
+        protocol._initialize_agents("Test task", mock_model)
+
+        mock_model.prepare_input.assert_not_called()
+        mock_model.generate_latent.assert_not_called()
