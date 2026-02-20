@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from lcn.core.kv_cache import KVCache
+
 
 class LCNModelWrapper:
     """
@@ -30,6 +32,8 @@ class LCNModelWrapper:
         self.latent_space_realign = latent_space_realign
         self.tokenizer = None
         self.model = None
+        # Cache for latent realignment matrices: model_id -> (matrix, target_norm)
+        self._latent_realign_matrices: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
 
     def render_chat(
         self, messages: List[Dict], add_generation_prompt: bool = True
@@ -85,3 +89,244 @@ class LCNModelWrapper:
         input_ids = encoded["input_ids"].to(self.device)
         attention_mask = encoded["attention_mask"].to(self.device)
         return input_ids, attention_mask
+
+    @staticmethod
+    def _past_length(past_key_values: Optional[KVCache]) -> int:
+        """
+        Get the sequence length from a KV-Cache.
+
+        Args:
+            past_key_values: KV-Cache tuple of (key, value) per layer,
+                where key/value have shape [batch, num_heads, seq_len, head_dim]
+
+        Returns:
+            Sequence length, or 0 if cache is None/empty
+        """
+        if not past_key_values:
+            return 0
+        # First layer, first tensor (key), dimension -2 is seq_len
+        k = past_key_values[0][0]
+        return k.shape[-2]
+
+    def _build_latent_realign_matrix(
+        self,
+        model: torch.nn.Module,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Build the latent space realignment matrix from model embeddings.
+
+        The realignment matrix transforms hidden states back to the input embedding
+        space, enabling effective latent reasoning steps.
+
+        Args:
+            model: The language model
+            device: Device to place tensors on
+
+        Returns:
+            Tuple of (realign_matrix, target_norm)
+            - realign_matrix: [hidden_dim, hidden_dim] transformation matrix
+            - target_norm: Target norm for normalized output
+
+        Raises:
+            RuntimeError: If model embeddings are not accessible
+        """
+        input_embeds = (
+            model.get_input_embeddings()
+            if hasattr(model, "get_input_embeddings")
+            else None
+        )
+        output_embeds = (
+            model.get_output_embeddings()
+            if hasattr(model, "get_output_embeddings")
+            else None
+        )
+
+        if output_embeds is None:
+            output_embeds = getattr(model, "lm_head", None)
+
+        if (
+            input_embeds is None
+            or output_embeds is None
+            or not hasattr(input_embeds, "weight")
+            or not hasattr(output_embeds, "weight")
+        ):
+            raise RuntimeError(
+                "Cannot build latent realignment matrix: embedding weights not accessible."
+            )
+
+        input_weight = input_embeds.weight.detach().to(device=device, dtype=torch.float32)
+        output_weight = output_embeds.weight.detach().to(device=device, dtype=torch.float32)
+
+        # Solve least squares: find M such that output_weight @ M ≈ input_weight
+        # This is (O^T O) M = O^T I, solved via torch.linalg.solve
+        gram = torch.matmul(output_weight.T, output_weight)
+        reg = 1e-5 * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
+        gram = gram + reg
+        rhs = torch.matmul(output_weight.T, input_weight)
+        realign_matrix = torch.linalg.solve(gram, rhs)
+
+        target_norm = input_weight.norm(dim=1).mean().detach()
+
+        return realign_matrix, target_norm
+
+    def _ensure_latent_realign_matrix(
+        self,
+        model: torch.nn.Module,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get or create the latent realignment matrix for a model.
+
+        Caches the matrix per model instance to avoid recomputation.
+
+        Args:
+            model: The language model
+            device: Device to place tensors on
+
+        Returns:
+            Tuple of (realign_matrix, target_norm)
+        """
+        key = id(model)
+        info = self._latent_realign_matrices.get(key)
+        target_device = torch.device(device)
+
+        if info is None:
+            matrix, target_norm = self._build_latent_realign_matrix(model, target_device)
+        else:
+            matrix, target_norm = info
+            if matrix.device != target_device:
+                matrix = matrix.to(target_device)
+
+        target_norm = (
+            target_norm.to(device=target_device, dtype=matrix.dtype)
+            if isinstance(target_norm, torch.Tensor)
+            else torch.as_tensor(target_norm, device=target_device, dtype=matrix.dtype)
+        )
+        self._latent_realign_matrices[key] = (matrix, target_norm)
+
+        return matrix, target_norm
+
+    def _apply_latent_realignment(
+        self,
+        hidden: torch.Tensor,
+        model: torch.nn.Module,
+    ) -> torch.Tensor:
+        """
+        Apply latent space realignment to a hidden state.
+
+        Transforms the hidden state and normalizes to target embedding norm.
+
+        Args:
+            hidden: Hidden state tensor [batch, hidden_dim]
+            model: The language model (used to get/cache realignment matrix)
+
+        Returns:
+            Aligned hidden state [batch, hidden_dim]
+        """
+        matrix, target_norm = self._ensure_latent_realign_matrix(model, hidden.device)
+        hidden_fp32 = hidden.to(torch.float32)
+        aligned = torch.matmul(hidden_fp32, matrix)
+
+        aligned_norm = aligned.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        aligned = aligned * (target_norm / aligned_norm)
+
+        return aligned.to(hidden.dtype)
+
+    @torch.no_grad()
+    def generate_latent(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        latent_steps: int,
+        past_key_values: Optional[KVCache] = None,
+    ) -> Tuple[KVCache, torch.Tensor]:
+        """
+        Generate KV-Cache and hidden state through latent steps.
+
+        Performs an initial forward pass to get the KV-Cache, then optionally
+        performs additional latent steps where the hidden state is fed back
+        as input embeddings.
+
+        Args:
+            input_ids: Input token IDs [batch, seq_len]
+            attention_mask: Attention mask [batch, seq_len], or None to use all ones
+            latent_steps: Number of additional latent reasoning steps
+            past_key_values: Optional existing KV-Cache to continue from
+
+        Returns:
+            Tuple of (kv_cache, hidden_state)
+            - kv_cache: Updated KV-Cache after all steps
+            - hidden_state: Final hidden state [batch, hidden_dim]
+
+        Raises:
+            RuntimeError: If model is not loaded
+            ValueError: If input_ids is not 2D
+        """
+        if self.model is None:
+            raise RuntimeError("Model not loaded. Call load() before generate_latent().")
+
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
+
+        # Create attention mask if not provided
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, device=self.device)
+        else:
+            attention_mask = attention_mask.to(self.device)
+
+        # Extend attention mask for past key values
+        if past_key_values is not None:
+            past_len = self._past_length(past_key_values)
+            if past_len > 0:
+                past_mask = torch.ones(
+                    (attention_mask.shape[0], past_len),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
+
+        # Initial forward pass
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        past = outputs.past_key_values
+        last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
+
+        # Latent steps
+        for _ in range(latent_steps):
+            # Get embedding for next latent step
+            if self.latent_space_realign:
+                latent_vec = self._apply_latent_realignment(last_hidden, self.model)
+            else:
+                # Use hidden state directly as input embedding
+                latent_vec = last_hidden
+
+            latent_embed = latent_vec.unsqueeze(1)  # [B, 1, D]
+
+            # Update attention mask for new position
+            past_len = self._past_length(past)
+            latent_mask = torch.ones(
+                (latent_embed.shape[0], past_len + 1),
+                dtype=torch.long,
+                device=self.device,
+            )
+
+            # Forward pass with embedding input
+            outputs = self.model(
+                inputs_embeds=latent_embed,
+                attention_mask=latent_mask,
+                past_key_values=past,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            past = outputs.past_key_values
+            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
+
+        return past, last_hidden
