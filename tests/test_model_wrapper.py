@@ -912,3 +912,416 @@ class TestGenerateLatentWithPastKeyValues:
         actual_mask = call_kwargs["attention_mask"]
         expected_length = past_seq_len + input_seq_len
         assert actual_mask.shape == (batch_size, expected_length)
+
+
+class TestGenerateText:
+    """Tests for LCNModelWrapper.generate_text method."""
+
+    def test_generate_text_raises_error_when_model_not_loaded(self):
+        """generate_text should raise RuntimeError if model is None."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+        # model is None by default
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        with pytest.raises(RuntimeError, match="[Mm]odel.*not.*loaded"):
+            wrapper.generate_text(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+
+    def test_generate_text_raises_error_for_non_2d_input(self):
+        """generate_text should raise ValueError for non-2D input_ids."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+        wrapper.model = MagicMock()
+        wrapper.tokenizer = MagicMock()
+
+        # 1D input instead of 2D
+        input_ids = torch.tensor([1, 2, 3])
+        attention_mask = torch.tensor([1, 1, 1])
+
+        with pytest.raises(ValueError, match="2D"):
+            wrapper.generate_text(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+
+    def test_generate_text_returns_list_of_strings(self):
+        """generate_text should return List[str]."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        batch_size, seq_len = 2, 5
+
+        # Mock tokenizer
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(side_effect=["Generated text 1", "Generated text 2"])
+        wrapper.tokenizer = mock_tokenizer
+
+        # Mock model.generate output
+        mock_outputs = MagicMock()
+        # generate returns sequences including prompt + generated
+        mock_outputs.sequences = torch.tensor([
+            [1, 2, 3, 4, 5, 10, 11, 12],  # prompt + generated
+            [1, 2, 3, 4, 5, 20, 21, 22],
+        ])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
+        attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
+
+        result = wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == batch_size
+        assert all(isinstance(s, str) for s in result)
+
+    def test_generate_text_calls_model_generate_with_correct_params(self):
+        """generate_text should call model.generate with expected parameters."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        batch_size, seq_len = 1, 3
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+        max_new_tokens = 128
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+        )
+
+        mock_model.generate.assert_called_once()
+        call_kwargs = mock_model.generate.call_args[1]
+
+        assert call_kwargs["max_new_tokens"] == max_new_tokens
+        assert call_kwargs["temperature"] == 0.7
+        assert call_kwargs["top_p"] == 0.95
+        assert call_kwargs["do_sample"] is True
+        assert call_kwargs["pad_token_id"] == mock_tokenizer.pad_token_id
+        assert call_kwargs["return_dict_in_generate"] is True
+
+    def test_generate_text_decodes_with_skip_special_tokens(self):
+        """generate_text should decode with skip_special_tokens=True."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="  Generated text  ")
+        wrapper.tokenizer = mock_tokenizer
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        result = wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        mock_tokenizer.decode.assert_called_once()
+        call_args = mock_tokenizer.decode.call_args
+        assert call_args[1]["skip_special_tokens"] is True
+
+        # Result should be stripped
+        assert result[0] == "Generated text"
+
+    def test_generate_text_strips_prompt_from_output(self):
+        """generate_text should strip prompt tokens from generated sequences."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        # Prompt length is 3, generated is 2 tokens
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])  # 3 prompt + 2 generated
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        # Verify decode was called with only the generated tokens (not prompt)
+        call_args = mock_tokenizer.decode.call_args
+        decoded_ids = call_args[0][0]
+        # Should be [10, 11] (the generated part), not [1, 2, 3, 10, 11]
+        assert decoded_ids.tolist() == [10, 11]
+
+    def test_generate_text_default_max_new_tokens(self):
+        """generate_text should default to max_new_tokens=256."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            # Not passing max_new_tokens - should default to 256
+        )
+
+        call_kwargs = mock_model.generate.call_args[1]
+        assert call_kwargs["max_new_tokens"] == 256
+
+
+class TestGenerateTextWithPastKeyValues:
+    """Tests for generate_text with past_key_values."""
+
+    def test_generate_text_extends_attention_mask_for_past(self):
+        """generate_text should prepend past length to attention_mask."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        batch_size, input_seq_len = 1, 3
+        num_layers, num_heads, head_dim = 1, 2, 32
+        past_seq_len = 5
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        # Create past_key_values
+        past_kv = tuple(
+            (
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_kv,
+        )
+
+        call_kwargs = mock_model.generate.call_args[1]
+        actual_mask = call_kwargs["attention_mask"]
+        expected_length = past_seq_len + input_seq_len
+        assert actual_mask.shape == (batch_size, expected_length)
+
+    def test_generate_text_passes_cache_position_when_past_provided(self):
+        """generate_text should pass cache_position when past_key_values is provided."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        batch_size, input_seq_len = 1, 3
+        num_layers, num_heads, head_dim = 1, 2, 32
+        past_seq_len = 5
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        past_kv = tuple(
+            (
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_kv,
+        )
+
+        call_kwargs = mock_model.generate.call_args[1]
+        cache_position = call_kwargs["cache_position"]
+
+        assert cache_position is not None
+        # cache_position should be [past_seq_len, past_seq_len+1, past_seq_len+2]
+        expected = torch.arange(past_seq_len, past_seq_len + input_seq_len)
+        assert torch.equal(cache_position, expected)
+
+    def test_generate_text_passes_past_key_values_to_generate(self):
+        """generate_text should pass past_key_values to model.generate."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        batch_size, input_seq_len = 1, 3
+        num_layers, num_heads, head_dim = 1, 2, 32
+        past_seq_len = 5
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        past_kv = tuple(
+            (
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+                torch.randn(batch_size, num_heads, past_seq_len, head_dim),
+            )
+            for _ in range(num_layers)
+        )
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10, 11]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_kv,
+        )
+
+        call_kwargs = mock_model.generate.call_args[1]
+        assert call_kwargs["past_key_values"] is past_kv
+
+    def test_generate_text_no_cache_position_when_no_past(self):
+        """generate_text should not pass cache_position when no past_key_values."""
+        from lcn.models.model_wrapper import LCNModelWrapper
+
+        wrapper = LCNModelWrapper(
+            model_name="test-model",
+            device=torch.device("cpu"),
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.decode = MagicMock(return_value="Generated")
+        wrapper.tokenizer = mock_tokenizer
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = torch.tensor([[1, 2, 3, 10]])
+
+        mock_model = MagicMock()
+        mock_model.generate = MagicMock(return_value=mock_outputs)
+        wrapper.model = mock_model
+
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        wrapper.generate_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=None,
+        )
+
+        call_kwargs = mock_model.generate.call_args[1]
+        assert call_kwargs.get("cache_position") is None

@@ -330,3 +330,86 @@ class LCNModelWrapper:
             last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
 
         return past, last_hidden
+
+    @torch.no_grad()
+    def generate_text(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        past_key_values: Optional[KVCache] = None,
+        max_new_tokens: int = 256,
+    ) -> List[str]:
+        """
+        Generate text from current state.
+
+        Uses the model's generate() method to produce text continuations.
+        When past_key_values is provided, extends the attention mask and
+        sets cache_position for proper continuation.
+
+        Args:
+            input_ids: Input token IDs [batch, seq_len]
+            attention_mask: Attention mask [batch, seq_len]
+            past_key_values: Optional KV-Cache from previous latent steps
+            max_new_tokens: Maximum number of tokens to generate (default: 256)
+
+        Returns:
+            List of generated text strings, one per batch item
+
+        Raises:
+            RuntimeError: If model is not loaded
+            ValueError: If input_ids is not 2D
+        """
+        if self.model is None:
+            raise RuntimeError("Model not loaded. Call load() before generate_text().")
+
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
+
+        # Track prompt lengths for stripping from output
+        prompt_lengths = attention_mask.sum(dim=1).tolist()
+
+        # Handle past_key_values: extend attention mask and set cache_position
+        cache_position = None
+        if past_key_values is not None:
+            past_len = self._past_length(past_key_values)
+            cache_position = torch.arange(
+                past_len,
+                past_len + input_ids.shape[-1],
+                dtype=torch.long,
+                device=self.device,
+            )
+            if past_len > 0:
+                past_mask = torch.ones(
+                    (attention_mask.shape[0], past_len),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
+
+        # Generate text
+        outputs = self.model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=0.7,
+            top_p=0.95,
+            do_sample=True,
+            pad_token_id=self.tokenizer.pad_token_id,
+            return_dict_in_generate=True,
+            output_scores=False,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+        )
+
+        # Decode generated sequences, stripping prompt tokens
+        sequences = outputs.sequences
+        generations: List[str] = []
+        for idx, length in enumerate(prompt_lengths):
+            length = int(length)
+            generated_ids = sequences[idx, length:]
+            text = self.tokenizer.decode(
+                generated_ids, skip_special_tokens=True
+            ).strip()
+            generations.append(text)
+
+        return generations
