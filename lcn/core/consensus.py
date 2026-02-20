@@ -298,8 +298,8 @@ class ConsensusProtocol:
                 past_key_values=kv_cache,
             )
 
-            # Store the agent's decision (first response, since batch_size=1)
-            agent_decisions[agent.agent_id] = responses[0]
+            # Extract decision from the response and store
+            agent_decisions[agent.agent_id] = self._extract_decision(responses[0])
 
         # Aggregate to group decision using majority vote
         decision = self._majority_vote(list(agent_decisions.values()))
@@ -310,6 +310,29 @@ class ConsensusProtocol:
             attention_history=attention_history,
             convergence_round=self.num_rounds,
         )
+
+    def _extract_decision(self, response: str) -> str:
+        """
+        Extract the decision from an agent's text response.
+
+        This is a placeholder implementation that returns the response as-is.
+        Environment-specific subclasses or future implementations should override
+        this method to extract structured decisions from free-form text responses.
+
+        For example:
+        - Hidden Profile environment might look for "Candidate X" patterns
+        - Opinion dynamics might extract sentiment or stance
+        - Voting scenarios might parse "Yes"/"No" from longer responses
+
+        Args:
+            response: The full text response from the agent
+
+        Returns:
+            The extracted decision (currently returns the full response)
+        """
+        # Placeholder: return the response as-is
+        # TODO: Implement environment-specific extraction logic
+        return response
 
     def _majority_vote(self, decisions: List[str]) -> str:
         """

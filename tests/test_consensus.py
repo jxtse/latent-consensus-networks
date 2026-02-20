@@ -1336,6 +1336,59 @@ class TestMakeDecision:
         assert result.decision == "A"
 
 
+class TestExtractDecision:
+    """Tests for ConsensusProtocol._extract_decision method."""
+
+    def test_extract_decision_returns_response_as_is(self):
+        """_extract_decision should return the response unchanged (placeholder behavior)."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        response = "After considering all factors, I believe Candidate C is the best choice."
+        decision = protocol._extract_decision(response)
+
+        # Placeholder implementation returns the full response
+        assert decision == response
+
+    def test_extract_decision_handles_empty_string(self):
+        """_extract_decision should handle empty string input."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        decision = protocol._extract_decision("")
+        assert decision == ""
+
+    def test_extract_decision_preserves_whitespace(self):
+        """_extract_decision should preserve whitespace in responses."""
+        kv_cache = HierarchicalKVCache(num_groups=1, agents_per_group=1)
+        attention = CrossLevelAttention(hidden_dim=64)
+
+        protocol = ConsensusProtocol(
+            kv_cache=kv_cache,
+            attention=attention,
+            num_rounds=2,
+            latent_steps=5,
+        )
+
+        response = "  Yes  "
+        decision = protocol._extract_decision(response)
+        assert decision == response
+
+
 class TestRunWithDecisionMaking:
     """Tests for run() method integration with _make_decision."""
 
