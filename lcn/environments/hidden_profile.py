@@ -2,11 +2,34 @@
 """Hidden Profile Task experiment environment."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from lcn.core.agent import LCNAgent
 from lcn.core.results import ConsensusResult
 from lcn.environments.base import BaseEnvironment
+
+
+@dataclass
+class HiddenProfileMetrics:
+    """
+    Evaluation metrics for a hidden profile task.
+
+    Captures how well the group and individual agents performed
+    in integrating hidden information and reaching the correct decision.
+
+    Attributes:
+        accuracy: 1.0 if the group chose the correct answer, 0.0 otherwise.
+        information_integration: Placeholder for measuring how much hidden
+                                info influenced the decision (currently 0.0).
+        individual_accuracy: Per-agent accuracy, mapping agent_id to 1.0/0.0
+                            based on whether they chose the correct answer.
+        decision_distribution: Count of how many agents chose each option.
+    """
+
+    accuracy: float
+    information_integration: float
+    individual_accuracy: Dict[int, float]
+    decision_distribution: Dict[str, int]
 
 
 @dataclass
@@ -229,23 +252,44 @@ class HiddenProfileEnvironment(BaseEnvironment):
 
         return prompt
 
-    def evaluate(self, result: ConsensusResult, scenario: Any) -> Any:
+    def evaluate(
+        self, result: ConsensusResult, scenario: HiddenProfileScenario
+    ) -> HiddenProfileMetrics:
         """
-        Evaluate consensus result.
+        Evaluate consensus result against the scenario.
 
-        Note: This is a stub implementation for Task 16.
-        Full implementation in Task 18.
+        Computes evaluation metrics including group accuracy, individual
+        accuracy per agent, and decision distribution.
 
         Args:
             result: The ConsensusResult from the consensus protocol.
             scenario: The HiddenProfileScenario that was presented.
 
         Returns:
-            Evaluation dict (stub returns basic structure).
+            HiddenProfileMetrics with computed evaluation metrics.
         """
-        # Stub implementation - full implementation in Task 18
-        return {
-            "decision": result.decision,
-            "correct_answer": scenario.correct_answer,
-            "is_correct": result.decision == scenario.correct_answer,
-        }
+        # Compute group accuracy
+        accuracy = 1.0 if result.decision == scenario.correct_answer else 0.0
+
+        # Placeholder for information integration
+        # TODO: Implement proper analysis of how hidden info influenced decisions
+        information_integration = 0.0
+
+        # Compute individual accuracy
+        individual_accuracy: Dict[int, float] = {}
+        for agent_id, decision in result.agent_decisions.items():
+            individual_accuracy[agent_id] = (
+                1.0 if decision == scenario.correct_answer else 0.0
+            )
+
+        # Compute decision distribution
+        decision_distribution: Dict[str, int] = {}
+        for decision in result.agent_decisions.values():
+            decision_distribution[decision] = decision_distribution.get(decision, 0) + 1
+
+        return HiddenProfileMetrics(
+            accuracy=accuracy,
+            information_integration=information_integration,
+            individual_accuracy=individual_accuracy,
+            decision_distribution=decision_distribution,
+        )

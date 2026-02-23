@@ -7,6 +7,7 @@ from dataclasses import fields
 from lcn.environments.base import BaseEnvironment
 from lcn.environments.hidden_profile import (
     HiddenProfileEnvironment,
+    HiddenProfileMetrics,
     HiddenProfileScenario,
 )
 from lcn.core.agent import LCNAgent
@@ -382,8 +383,50 @@ class TestHiddenProfileEnvironmentGetAgentPrompt:
         assert any(word in prompt_lower for word in ["private", "your", "unique", "only you"])
 
 
+class TestHiddenProfileMetrics:
+    """Tests for HiddenProfileMetrics dataclass."""
+
+    def test_is_dataclass(self):
+        """HiddenProfileMetrics should be a dataclass."""
+        assert hasattr(HiddenProfileMetrics, "__dataclass_fields__")
+
+    def test_has_accuracy_field(self):
+        """HiddenProfileMetrics should have accuracy field."""
+        field_names = [f.name for f in fields(HiddenProfileMetrics)]
+        assert "accuracy" in field_names
+
+    def test_has_information_integration_field(self):
+        """HiddenProfileMetrics should have information_integration field."""
+        field_names = [f.name for f in fields(HiddenProfileMetrics)]
+        assert "information_integration" in field_names
+
+    def test_has_individual_accuracy_field(self):
+        """HiddenProfileMetrics should have individual_accuracy field."""
+        field_names = [f.name for f in fields(HiddenProfileMetrics)]
+        assert "individual_accuracy" in field_names
+
+    def test_has_decision_distribution_field(self):
+        """HiddenProfileMetrics should have decision_distribution field."""
+        field_names = [f.name for f in fields(HiddenProfileMetrics)]
+        assert "decision_distribution" in field_names
+
+    def test_can_instantiate_with_valid_data(self):
+        """HiddenProfileMetrics should be instantiable with valid data."""
+        metrics = HiddenProfileMetrics(
+            accuracy=1.0,
+            information_integration=0.5,
+            individual_accuracy={0: 1.0, 1: 0.0},
+            decision_distribution={"A": 2, "B": 1},
+        )
+
+        assert metrics.accuracy == 1.0
+        assert metrics.information_integration == 0.5
+        assert metrics.individual_accuracy == {0: 1.0, 1: 0.0}
+        assert metrics.decision_distribution == {"A": 2, "B": 1}
+
+
 class TestHiddenProfileEnvironmentEvaluate:
-    """Tests for evaluate method (stub for now)."""
+    """Tests for evaluate method."""
 
     def test_evaluate_exists(self):
         """evaluate method should exist."""
@@ -391,8 +434,8 @@ class TestHiddenProfileEnvironmentEvaluate:
         assert hasattr(env, "evaluate")
         assert callable(env.evaluate)
 
-    def test_evaluate_accepts_result_and_scenario(self):
-        """evaluate should accept ConsensusResult and scenario."""
+    def test_evaluate_returns_hidden_profile_metrics(self):
+        """evaluate should return HiddenProfileMetrics."""
         env = HiddenProfileEnvironment()
         scenario = env.scenarios[0]
         result = ConsensusResult(
@@ -402,11 +445,163 @@ class TestHiddenProfileEnvironmentEvaluate:
             convergence_round=1,
         )
 
-        # Should not raise - just verify it runs
-        evaluation = env.evaluate(result, scenario)
+        metrics = env.evaluate(result, scenario)
 
-        # Stub can return anything, just verify it doesn't crash
-        assert evaluation is not None
+        assert isinstance(metrics, HiddenProfileMetrics)
+
+    def test_evaluate_accuracy_correct_decision(self):
+        """evaluate should return accuracy=1.0 when decision matches correct_answer."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]  # correct_answer is "C"
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "C", 1: "A"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.accuracy == 1.0
+
+    def test_evaluate_accuracy_incorrect_decision(self):
+        """evaluate should return accuracy=0.0 when decision does not match correct_answer."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]  # correct_answer is "C"
+        result = ConsensusResult(
+            decision="A",
+            agent_decisions={0: "A", 1: "A"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.accuracy == 0.0
+
+    def test_evaluate_information_integration_placeholder(self):
+        """evaluate should return information_integration=0.0 as placeholder."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "C", 1: "C"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        # Placeholder implementation returns 0.0
+        assert metrics.information_integration == 0.0
+
+    def test_evaluate_individual_accuracy_all_correct(self):
+        """evaluate should compute individual_accuracy for each agent."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]  # correct_answer is "C"
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "C", 1: "C", 2: "C"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.individual_accuracy == {0: 1.0, 1: 1.0, 2: 1.0}
+
+    def test_evaluate_individual_accuracy_mixed(self):
+        """evaluate should compute individual_accuracy with mixed results."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]  # correct_answer is "C"
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "C", 1: "A", 2: "B", 3: "C"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.individual_accuracy == {0: 1.0, 1: 0.0, 2: 0.0, 3: 1.0}
+
+    def test_evaluate_individual_accuracy_all_incorrect(self):
+        """evaluate should compute individual_accuracy when all agents are wrong."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]  # correct_answer is "C"
+        result = ConsensusResult(
+            decision="A",
+            agent_decisions={0: "A", 1: "B", 2: "A"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.individual_accuracy == {0: 0.0, 1: 0.0, 2: 0.0}
+
+    def test_evaluate_decision_distribution(self):
+        """evaluate should count decisions per option."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "A", 1: "A", 2: "B", 3: "C", 4: "C", 5: "C"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.decision_distribution == {"A": 2, "B": 1, "C": 3}
+
+    def test_evaluate_decision_distribution_single_option(self):
+        """evaluate should handle case where all agents choose the same option."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={0: "C", 1: "C", 2: "C"},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.decision_distribution == {"C": 3}
+
+    def test_evaluate_decision_distribution_empty_agents(self):
+        """evaluate should handle empty agent_decisions."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[0]
+        result = ConsensusResult(
+            decision="C",
+            agent_decisions={},
+            attention_history=[],
+            convergence_round=1,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.decision_distribution == {}
+        assert metrics.individual_accuracy == {}
+
+    def test_evaluate_with_scenario2(self):
+        """evaluate should work with second scenario (correct_answer is Z)."""
+        env = HiddenProfileEnvironment()
+        scenario = env.scenarios[1]  # correct_answer is "Z"
+        result = ConsensusResult(
+            decision="Z",
+            agent_decisions={0: "Z", 1: "X", 2: "Z"},
+            attention_history=[],
+            convergence_round=2,
+        )
+
+        metrics = env.evaluate(result, scenario)
+
+        assert metrics.accuracy == 1.0
+        assert metrics.individual_accuracy == {0: 1.0, 1: 0.0, 2: 1.0}
+        assert metrics.decision_distribution == {"Z": 2, "X": 1}
 
 
 class TestHiddenProfileEnvironmentImport:
@@ -423,3 +618,9 @@ class TestHiddenProfileEnvironmentImport:
         from lcn.environments import HiddenProfileScenario as ImportedScenario
 
         assert ImportedScenario is HiddenProfileScenario
+
+    def test_import_metrics_from_environments_module(self):
+        """HiddenProfileMetrics should be importable from lcn.environments."""
+        from lcn.environments import HiddenProfileMetrics as ImportedMetrics
+
+        assert ImportedMetrics is HiddenProfileMetrics
