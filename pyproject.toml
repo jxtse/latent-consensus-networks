@@ -2,10 +2,10 @@
 name = "lcn"
 version = "0.1.0"
 description = "Latent Consensus Networks for Multi-Agent Collaboration"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "torch>=2.0.0",
-    "transformers>=4.35.0",
+    "transformers>=5.2.0",
     "pyyaml>=6.0",
     "numpy>=1.24.0",
     "tqdm>=4.65.0",
@@ -24,3 +24,9 @@ dev = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+lcn = ["configs/*.yaml"]
+
+[tool.setuptools.packages.find]
+include = ["lcn*"]

@@ -1,0 +1,14 @@
+environment: hidden_profile
+seed: 0
+model:
+  backend: mock
+  hidden_dim: 32
+  device: cpu
+  kv_num_layers: 2
+  kv_seq_len: 4
+protocol:
+  num_rounds: 3
+  latent_steps: 2
+  num_groups: 2
+  agents_per_group: 2
+  temperature: 0.8

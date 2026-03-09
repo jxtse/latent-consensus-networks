@@ -1,7 +1,6 @@
-# lcn/core/agent.py
 """LCN Agent definition."""
 
-from typing import Optional
+from typing import Any, Dict, Optional
 import torch
 
 
@@ -24,11 +23,13 @@ class LCNAgent:
         group_id: int,
         hidden_dim: int,
         persona: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         self.agent_id = agent_id
         self.group_id = group_id
         self.hidden_dim = hidden_dim
         self.persona = persona
+        self.metadata: Dict[str, Any] = metadata.copy() if metadata else {}
 
         self.state: Optional[torch.Tensor] = None
 
@@ -45,6 +46,10 @@ class LCNAgent:
     def reset(self) -> None:
         """Reset the agent's state."""
         self.state = None
+
+    def update_metadata(self, **kwargs: Any) -> None:
+        """Update agent metadata used by environments and runners."""
+        self.metadata.update(kwargs)
 
     def __repr__(self) -> str:
         return f"LCNAgent(id={self.agent_id}, group={self.group_id}, persona={self.persona})"

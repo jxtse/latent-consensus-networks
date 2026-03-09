@@ -27,7 +27,8 @@ class TestHierarchicalKVCache:
         cache.update_local(agent_id=0, group_id=0, kv_cache=mock_kv)
 
         assert 0 in cache.local_caches
-        assert cache.local_caches[0] is mock_kv
+        assert cache.local_caches[0] is not mock_kv
+        assert cache.local_caches[0][0][0].device.type == "cpu"
 
     def test_get_group_members(self):
         """get_group_members should return all agents in a group."""

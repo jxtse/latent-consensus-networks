@@ -1,0 +1,17 @@
+environment: hidden_profile
+seed: 0
+model:
+  backend: qwen3.5
+  model_name: Qwen/Qwen3.5-4B
+  hidden_dim:
+  device: cuda
+  kv_num_layers: 1
+  kv_seq_len: 2
+  torch_dtype: bfloat16
+  per_agent_gpu: true
+protocol:
+  num_rounds: 1
+  latent_steps: 1
+  num_groups: 2
+  agents_per_group: 2
+  temperature: 1.0

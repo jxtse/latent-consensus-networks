@@ -53,7 +53,7 @@ class HierarchicalKVCache:
             group_id: Group the agent belongs to
             kv_cache: The KV-Cache to store
         """
-        self.local_caches[agent_id] = kv_cache
+        self.local_caches[agent_id] = self._move_cache_to_cpu(kv_cache)
         self._agent_to_group[agent_id] = group_id
 
     def get_local(self, agent_id: int) -> Optional[KVCache]:
@@ -186,3 +186,14 @@ class HierarchicalKVCache:
             result.append((mean_key, mean_value))
 
         return tuple(result)
+
+    @staticmethod
+    def _move_cache_to_cpu(kv_cache: KVCache) -> KVCache:
+        """Store cache tensors on CPU so multi-GPU aggregation has a common device."""
+        return tuple(
+            (
+                key.detach().to("cpu"),
+                value.detach().to("cpu"),
+            )
+            for key, value in kv_cache
+        )
